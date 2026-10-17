@@ -1,3 +1,4 @@
+import type { Issue } from './errors';
 export type Format = 'jpeg' | 'png' | 'webp' | 'gif' | 'bmp' | 'tiff';
 export type ResizeMode = 'original' | 'fit' | 'percentage' | 'exact';
 export interface Settings {
@@ -22,4 +23,4 @@ export interface ConversionResult extends ImageInfo {
 export type WorkerRequest = { id: number; action: 'inspect'; file: File } |
   { id: number; action: 'convert'; file: File; settings: Settings };
 export type WorkerReply = { id: number; ok: true; result: ImageInfo | ConversionResult } |
-  { id: number; ok: false; error: string };
+  { id: number; ok: false; error: Issue };

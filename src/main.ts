@@ -1,32 +1,43 @@
 import './style.css';
 import { icon } from './icons';
+import { detectLocale, getLocale, languageInfo, languages, number, setLocale, t, type Locale, type MessageKey, type Params } from './i18n';
+import { AppError, issue, type Issue } from './errors';
 import type { ConversionResult, Format, ImageInfo, Settings, WorkerReply, WorkerRequest } from './types';
 
 interface Job {
   id: number; file: File; info?: ImageInfo; thumbnail?: string;
   status: 'loading' | 'ready' | 'processing' | 'done' | 'error';
-  error?: string; result?: ConversionResult; outputUrl?: string; outputThumbnail?: string; outputName?: string;
+  error?: Issue; result?: ConversionResult; outputUrl?: string; outputThumbnail?: string; outputName?: string;
 }
-
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-const bytes = (value: number) => value < 1000 ? `${value} B` : value < 1e6 ? `${(value / 1000).toFixed(value < 10000 ? 1 : 0)} KB` : `${(value / 1e6).toFixed(1)} MB`;
+let savedLanguage: string | null = null;
+try { savedLanguage = localStorage.getItem('resz-language'); } catch { /* Storage can be unavailable in private browsing. */ }
+setLocale(detectLocale(new URL(location.href).searchParams.get('lang'), savedLanguage, navigator.languages));
+const tr = (key: MessageKey) => `<span data-i18n="${key}">${escape(t(key))}</span>`;
+const aria = (key: MessageKey) => `aria-label="${escape(t(key))}" data-i18n-aria="${key}"`;
+const option = (value: string, key: MessageKey) => `<option value="${value}" data-i18n="${key}">${escape(t(key))}</option>`;
+const bytes = (value: number) => value < 1000 ? `${number(value)} ${t('unitBytes')}` : value < 1e6 ? `${number(value / 1000, value < 10000 ? 1 : 0)} KB` : `${number(value / 1e6, 1)} MB`;
+const dimensions = (width: number, height: number) => `<bdi dir="ltr">${number(width)} × ${number(height)}</bdi> ${escape(t('pixel'))}`;
 const extensions: Record<Format, string> = { jpeg: 'jpg', png: 'png', webp: 'webp', gif: 'gif', bmp: 'bmp', tiff: 'tiff' };
+const formatKeys: Record<Format, MessageKey> = { jpeg: 'formatJpeg', png: 'formatPng', webp: 'formatWebp', gif: 'formatGif', bmp: 'formatBmp', tiff: 'formatTiff' };
+const statusKeys: Record<Job['status'], MessageKey> = { loading: 'statusLoading', ready: 'statusReady', processing: 'statusProcessing', done: 'statusDone', error: 'statusError' };
 let jobs: Job[] = [], nextJobId = 0, busy = false, importing = false, cancelled = false, requestId = 0;
-let zipBusy = false, activePreview: number | null = null;
+let zipBusy = false, sampleBusy = false, activePreview: number | null = null, previewConverted = false;
+let progressState = { current: 0, total: 0, completed: 0 };
 let worker: Worker;
 const pending = new Map<number, { resolve: (result: ImageInfo | ConversionResult) => void; reject: (error: Error) => void }>();
-
 function startWorker() {
   worker = new Worker(new URL('./image.worker.ts', import.meta.url), { type: 'module' });
   worker.onmessage = (event: MessageEvent<WorkerReply>) => {
     const message = event.data, handler = pending.get(message.id);
     if (!handler) return;
     pending.delete(message.id);
-    if (message.ok) handler.resolve(message.result); else handler.reject(new Error(message.error));
+    if (message.ok) handler.resolve(message.result);
+    else handler.reject(new AppError(message.error.code, message.error.params));
   };
   worker.onerror = () => {
-    for (const handler of pending.values()) handler.reject(new Error('The image worker stopped. Try a smaller image or a different format.'));
+    for (const handler of pending.values()) handler.reject(new AppError('errorWorker'));
     pending.clear(); worker.terminate(); startWorker();
   };
 }
@@ -40,256 +51,249 @@ startWorker();
 
 app.innerHTML = `
 <header class="site-header">
-  <a class="brand" href="./" aria-label="Still home"><span class="brand-mark">${icon('images', 25)}</span><span>still<span class="brand-dot">.</span></span><span class="brand-caption">THE LOCAL IMAGE STUDIO</span></a>
-  <div class="header-right"><span class="local-status"><span class="status-dot"></span>100% on your device</span><button class="icon-button help-button" id="help-button" aria-label="About Still">${icon('info')}</button></div>
+  <a class="brand" href="./" ${aria('home')}><span class="brand-mark">${icon('images', 25)}</span><bdi dir="ltr">resz<span class="brand-dot">.im</span></bdi><span class="brand-caption">${tr('brandCaption')}</span></a>
+  <div class="header-right"><span class="local-status"><span class="status-dot"></span>${tr('localOnly')}</span><label class="language-picker">${icon('globe')}<span class="sr-only">${tr('language')}</span><select id="language" ${aria('language')}>${languages.map(language => `<option value="${language.code}" lang="${language.code}" dir="${language.direction}">${language.name}</option>`).join('')}</select></label><button class="icon-button help-button" id="help-button" ${aria('about')}>${icon('info')}</button></div>
 </header>
 <main class="page">
-  <div class="intro"><div><p class="eyebrow">SMALLER FILES. BIG POSSIBILITIES.</p><h1>Your images, <span>all set.</span></h1><p class="intro-copy">Convert, resize, and lighten the whole batch. Keep it all to yourself.</p></div><div class="intro-note">${icon('shield', 23)}<span>No uploads.<br><strong>Just your browser.</strong></span></div></div>
+  <div class="intro"><div><p class="eyebrow">${tr('eyebrow')}</p><h1>${tr('heroTitle')}</h1><p class="intro-copy">${tr('heroSubtitle')}</p></div><div class="intro-note">${icon('shield', 26)}<span>${tr('noUpload')}<br><strong>${tr('browserOnly')}</strong></span></div></div>
   <div class="workspace">
-    <section class="image-workspace" aria-label="Image workspace">
-      <div class="section-heading"><div class="section-label"><span class="step">01</span><h2>Your images</h2><span class="count-badge" id="file-count">0</span></div><div class="workspace-actions"><button class="text-button" id="clear-button" hidden>Clear all</button><button class="button button-small button-outline" id="add-button">${icon('plus',16)} Add images</button></div></div>
+    <section class="image-workspace" ${aria('workspace')}>
+      <div class="section-heading"><div class="section-label"><span class="step" aria-hidden="true">01</span><h2>${tr('images')}</h2><span class="count-badge" id="file-count">0</span></div><div class="workspace-actions"><button class="text-button" id="clear-button" hidden>${tr('clearAll')}</button><button class="button button-small button-outline" id="add-button">${icon('plus')} ${tr('addImages')}</button></div></div>
       <input type="file" id="file-input" multiple accept="image/*,.heic,.heif,.tif,.tiff,.avif,.bmp" hidden />
-      <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Choose images or drag and drop them here">
-        <div class="image-stack" aria-hidden="true"><div class="art-card art-back"><span>HEIC</span></div><div class="art-card art-middle"><span>PNG</span></div><div class="art-card art-front"><svg viewBox="0 0 176 128"><defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="#e5edda"/><stop offset="1" stop-color="#cbd6bf"/></linearGradient></defs><rect width="176" height="128" fill="url(#sky)"/><circle cx="127" cy="33" r="14" fill="#f8f2c9"/><path d="M0 100 59 40l65 88H0Z" fill="#85957a"/><path d="m59 40-18 45 18-10 22 22Z" fill="#e9eadb"/><path d="m57 128 60-69 59 61v8Z" fill="#4a6750"/><path d="m117 59-19 40 20-9 17 17Z" fill="#bccbb0"/><path d="M0 115q39-10 75 3t101-6v16H0Z" fill="#304d39"/></svg><div class="art-card-bottom"><span>JPG</span><span>✦</span></div></div><span class="stack-plus">${icon('plus',20)}</span></div>
-        <h3>A fresh start for your files.</h3><p>Drop your images here, or <span class="inline-link">browse files</span></p><span class="supported">HEIC, JPG, PNG, WebP, GIF, TIFF, AVIF & more</span>
-        <span class="drop-caption">One image or a whole folder’s worth. You’re in control.</span>
+      <div class="dropzone" id="dropzone" role="button" tabindex="0" ${aria('chooseImages')}>
+        <div class="image-stack" aria-hidden="true"><div class="art-card art-back"></div><div class="art-card art-middle"></div><div class="art-card art-front"><svg viewBox="0 0 176 128"><defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="#e5edda"/><stop offset="1" stop-color="#cbd6bf"/></linearGradient></defs><rect width="176" height="128" fill="url(#sky)"/><circle cx="127" cy="33" r="14" fill="#f8f2c9"/><path d="M0 100 59 40l65 88H0Z" fill="#85957a"/><path d="m59 40-18 45 18-10 22 22Z" fill="#e9eadb"/><path d="m57 128 60-69 59 61v8Z" fill="#4a6750"/><path d="m117 59-19 40 20-9 17 17Z" fill="#bccbb0"/><path d="M0 115q39-10 75 3t101-6v16H0Z" fill="#304d39"/></svg></div><span class="stack-plus">${icon('plus')}</span></div>
+        <h3>${tr('dropTitle')}</h3><p>${tr('dropLead')} <span class="inline-link">${tr('browseFiles')}</span></p><span class="supported">${tr('supported')}</span><span class="drop-caption">${tr('dropCaption')}</span>
       </div>
-      <div class="batch-toolbar" id="batch-toolbar" hidden><span id="batch-description"></span><span class="view-label">${icon('grid',14)} Grid view</span></div>
+      <div class="batch-toolbar" id="batch-toolbar" hidden><span id="batch-description"></span><span class="view-label">${icon('grid',18)} ${tr('gridView')}</span></div>
       <div class="image-grid" id="image-grid"></div>
-      <div class="progress-panel" id="progress-panel" hidden><div><span id="progress-label"></span><button class="text-button" id="cancel-button">Cancel</button></div><progress id="progress-bar" max="100" value="0"></progress></div>
+      <div class="progress-panel" id="progress-panel" hidden><div><span id="progress-label"></span><button class="text-button" id="cancel-button">${tr('cancel')}</button></div><progress id="progress-bar" max="100" value="0" ${aria('statusProcessing')}></progress></div>
       <div class="batch-summary" id="batch-summary" hidden></div>
-      <div class="sample-row" id="sample-row"><span>Just looking around?</span><button class="text-button" id="sample-button">Try a sample batch ${icon('arrow',15)}</button></div>
-      <div class="privacy-card">${icon('lock',19)}<div><strong>Your files don’t leave this tab.</strong><p>Everything happens locally. No account, no uploads, no waiting in line.</p></div><span class="privacy-check">${icon('check',15)}</span></div>
-      <div class="how-it-works"><div><span>01</span><strong>Drop it in</strong><p>A few files or the full batch.</p></div><div><span>02</span><strong>Make it fit</strong><p>Your format, size, and quality.</p></div><div><span>03</span><strong>Take it with you</strong><p>One tidy ZIP. All done.</p></div></div>
+      <div class="sample-row" id="sample-row"><span>${tr('samplePrompt')}</span><button class="text-button" id="sample-button">${tr('sampleButton')} ${icon('arrow',18)}</button></div>
+      <div class="privacy-card">${icon('lock',24)}<div><strong>${tr('privacyTitle')}</strong><p>${tr('privacyBody')}</p></div><span class="privacy-check">${icon('check',20)}</span></div>
+      <div class="how-it-works"><div><span aria-hidden="true">01</span><strong>${tr('stepImport')}</strong><p>${tr('stepImportHint')}</p></div><div><span aria-hidden="true">02</span><strong>${tr('stepAdjust')}</strong><p>${tr('stepAdjustHint')}</p></div><div><span aria-hidden="true">03</span><strong>${tr('stepExport')}</strong><p>${tr('stepExportHint')}</p></div></div>
     </section>
-    <aside class="settings-panel" aria-label="Export settings">
-      <div class="settings-heading"><div class="section-label"><span class="step">02</span><h2>Make it yours</h2></div><button class="icon-button" id="reset-button" aria-label="Reset settings" title="Reset settings">${icon('refresh',17)}</button></div>
+    <aside class="settings-panel" ${aria('exportSettings')}>
+      <div class="settings-heading"><div class="section-label"><span class="step" aria-hidden="true">02</span><h2>${tr('exportSettings')}</h2></div><button class="icon-button" id="reset-button" ${aria('resetSettings')}>${icon('refresh')}</button></div>
       <form id="settings-form">
-        <fieldset class="settings-section"><legend>Convert to</legend><div class="format-options" role="group" aria-label="Output format">${(['jpeg','png','webp','gif','bmp','tiff'] as Format[]).map(format => `<button type="button" class="format-button ${format === 'jpeg' ? 'selected' : ''}" data-format="${format}" aria-pressed="${format === 'jpeg'}">${extensions[format].toUpperCase()}</button>`).join('')}</div><p class="field-hint" id="format-hint">The everyday favorite. Small files, ready for anything.</p></fieldset>
-        <div class="settings-section quality-section"><div class="field-label"><label for="quality">Quality</label><output for="quality" id="quality-value">85<span>%</span></output></div><input type="range" id="quality" min="1" max="100" value="85"/><div class="range-labels"><span>Smaller file</span><span>Better quality</span></div></div>
-        <fieldset class="settings-section"><legend>${icon('resize',16)} Resize</legend><div class="select-wrap"><select id="resize" aria-label="Resize mode"><option value="original">Keep original dimensions</option><option value="fit">Fit within dimensions</option><option value="percentage">Scale by percentage</option><option value="exact">Exact dimensions (stretch)</option></select>${icon('chevron',16)}</div><div class="dimension-controls" id="dimension-controls" hidden><div class="dimensions"><label>Width<div class="input-unit"><input id="width" type="number" value="1920" min="1" max="32767" step="1"/><span>px</span></div></label><span class="dimension-times">×</span><label>Height<div class="input-unit"><input id="height" type="number" value="1080" min="1" max="32767" step="1"/><span>px</span></div></label></div><p class="field-hint" id="resize-hint">Keeps the aspect ratio. Fits inside this box.</p></div><div id="percentage-control" hidden><label class="input-unit percentage-input"><input id="percentage" aria-label="Scale percentage" type="number" min="1" max="400" step="1" value="50"/><span>%</span></label></div><label class="checkbox-label" id="upscale-control" hidden><input type="checkbox" id="upscale"/> Allow enlarging smaller images</label></fieldset>
-        <fieldset class="settings-section size-section"><div class="field-label"><label class="toggle-label" for="limit-enabled">${icon('compress',16)} Limit file size</label><label class="switch"><input type="checkbox" id="limit-enabled" aria-label="Limit file size"/><span></span></label></div><p class="field-hint">A little lighter. A perfect fit.</p><div id="limit-controls" hidden><div class="size-input"><input id="max-size" aria-label="Maximum file size" type="number" min="1" max="1000000000" value="500" step="1"/><select id="size-unit" aria-label="File size unit"><option value="1">bytes</option><option value="1000" selected>KB</option><option value="1000000">MB</option></select></div><label class="checkbox-label"><input type="checkbox" id="auto-resize" checked/> Reduce dimensions if needed</label><p class="field-hint">At most this many bytes per image. 1 KB = 1,000 bytes.</p></div></fieldset>
-        <details class="advanced settings-section"><summary>Finishing touches ${icon('chevron',16)}</summary><div class="advanced-content"><label for="suffix">Add to file names</label><input type="text" id="suffix" value="-still" placeholder="e.g. -web" maxlength="60"/><label class="background-label" for="background">JPG & BMP background<input type="color" id="background" value="#ffffff"/></label><p class="field-hint">Transparent areas use this color in JPG and BMP.</p></div></details>
+        <fieldset class="settings-section"><legend>${tr('convertTo')}</legend><div class="format-options" role="group" ${aria('convertTo')}>${(['jpeg','png','webp','gif','bmp','tiff'] as Format[]).map(format => `<button type="button" class="format-button ${format === 'jpeg' ? 'selected' : ''}" data-format="${format}" aria-pressed="${format === 'jpeg'}">${extensions[format].toUpperCase()}</button>`).join('')}</div><p class="field-hint" id="format-hint"></p></fieldset>
+        <div class="settings-section quality-section"><div class="field-label"><label for="quality">${tr('quality')}</label><output for="quality" id="quality-value"></output></div><input type="range" id="quality" min="1" max="100" value="85" ${aria('quality')}/><div class="range-labels"><span>${tr('smallerFile')}</span><span>${tr('betterQuality')}</span></div></div>
+        <fieldset class="settings-section"><legend>${icon('resize')} ${tr('resize')}</legend><div class="select-wrap"><select id="resize" ${aria('resizeMode')}>${option('original','resizeOriginal')}${option('fit','resizeFit')}${option('percentage','resizePercentage')}${option('exact','resizeExact')}</select>${icon('chevron')}</div><div class="dimension-controls" id="dimension-controls" hidden><div class="dimensions"><label for="width">${tr('width')}<span class="input-unit"><input id="width" type="number" value="1920" min="1" max="32767" step="1"/><span>${tr('pixel')}</span></span></label><span class="dimension-times" aria-hidden="true">×</span><label for="height">${tr('height')}<span class="input-unit"><input id="height" type="number" value="1080" min="1" max="32767" step="1"/><span>${tr('pixel')}</span></span></label></div><p class="field-hint" id="resize-hint"></p></div><div id="percentage-control" hidden><label class="input-unit percentage-input"><span class="sr-only">${tr('scalePercentage')}</span><input id="percentage" type="number" min="1" max="400" step="1" value="50"/><span>%</span></label></div><label class="checkbox-label" id="upscale-control" hidden><input type="checkbox" id="upscale"/>${tr('allowUpscale')}</label></fieldset>
+        <fieldset class="settings-section size-section"><div class="field-label"><label class="toggle-label" for="limit-enabled">${icon('compress')} ${tr('limitSize')}</label><label class="switch"><input type="checkbox" id="limit-enabled" ${aria('limitSize')}/><span></span></label></div><p class="field-hint">${tr('limitHint')}</p><div id="limit-controls" hidden><div class="size-input"><input id="max-size" ${aria('maxSize')} type="number" min="1" max="1000000000" value="500" step="1"/><select id="size-unit" ${aria('sizeUnit')}>${option('1','unitBytes')}<option value="1000" selected>KB</option><option value="1000000">MB</option></select></div><label class="checkbox-label"><input type="checkbox" id="auto-resize" checked/>${tr('autoResize')}</label><p class="field-hint">${tr('limitHelp')}</p></div></fieldset>
+        <details class="advanced settings-section"><summary>${tr('advanced')} ${icon('chevron')}</summary><div class="advanced-content"><label for="suffix">${tr('suffix')}</label><input type="text" id="suffix" value="-resz" placeholder="${escape(t('suffixPlaceholder'))}" data-i18n-placeholder="suffixPlaceholder" maxlength="60"/><label class="background-label" for="background">${tr('background')}<input type="color" id="background" value="#ffffff"/></label><p class="field-hint">${tr('backgroundHint')}</p></div></details>
       </form>
-      <div class="export-section"><div class="export-detail"><span id="export-count">Your batch, ready when you are.</span><span>.zip</span></div><button class="button button-primary" id="convert-button" disabled>${icon('spark',18)} Convert images ${icon('arrow',18)}</button><button class="button button-download" id="download-button" hidden>${icon('download',18)} Download ZIP <span id="zip-size"></span></button><p class="export-note" id="export-note">Add a few images to get started.</p><p class="animation-note">Animated images & multi-page files export as a still image (first frame or page). Metadata is removed.</p></div>
+      <div class="export-section"><div class="export-detail"><span id="export-count"></span><bdi dir="ltr">.zip</bdi></div><button class="button button-primary" id="convert-button" disabled></button><button class="button button-download" id="download-button" hidden></button><p class="export-note" id="export-note"></p><p class="animation-note">${tr('animationNote')}</p></div>
     </aside>
   </div>
-  <footer><span>Made for your images. Mindful of your privacy.</span><span class="footer-local">${icon('leaf',14)} <span id="offline-status">A little less cloud. A little more you.</span></span></footer>
+  <footer><span>${tr('footer')}</span><span class="footer-local">${icon('leaf',20)} ${tr('footerLocal')}</span></footer>
 </main>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-<dialog id="about-dialog" class="dialog about-dialog"><button class="icon-button dialog-close" data-close="about-dialog" aria-label="Close about">${icon('close')}</button><span class="brand-mark">${icon('images',25)}</span><h2>A little studio.<br>All yours.</h2><p>Still converts and resizes your images entirely in your browser. Your images are never uploaded, and there are no analytics or accounts.</p><p>Import HEIC/HEIF, JPG, PNG, WebP, GIF, TIFF, AVIF, BMP, or other browser-supported images. Export JPG, PNG, WebP, GIF, BMP, and TIFF.</p><p>Size limits are verified against the final file. Quality may be lowered and dimensions may be reduced if you allow it. Files that can’t meet your limit are marked with an error and excluded from downloads.</p><p>Animated images use the first frame. TIFF and HEIC collections use the first image. Exports remove metadata and use 8-bit browser color. Keep your originals for HDR or print workflows.</p><p class="field-hint">Your images live only in this tab. Refreshing or closing it clears the batch. <a href="https://github.com/iebb/imgconv" target="_blank" rel="noopener noreferrer">View source on GitHub ↗</a></p></dialog>
-<dialog id="preview-dialog" class="dialog preview-dialog"><div class="preview-header"><div><h2 id="preview-title"></h2><p id="preview-description"></p></div><button class="icon-button" data-close="preview-dialog" aria-label="Close preview">${icon('close')}</button></div><div class="preview-tabs"><button id="preview-original" class="selected">Original</button><button id="preview-result">Converted</button></div><div class="preview-image-wrap"><img id="preview-image" alt=""/></div><div class="preview-footer"><span>Preview · scaled to fit</span><button class="button button-small button-outline" id="preview-download">${icon('download',16)} Download image</button></div></dialog>`;
+<dialog id="about-dialog" class="dialog about-dialog"><button class="icon-button dialog-close" data-close="about-dialog" ${aria('closeAbout')}>${icon('close')}</button><span class="brand-mark">${icon('images',25)}</span><h2>${tr('aboutTitle')}</h2><p>${tr('aboutPrivacy')}</p><p>${tr('aboutFormats')}</p><p>${tr('aboutLimits')}</p><p>${tr('aboutColor')}</p><p>${tr('aboutSession')}</p><p><a href="https://github.com/iebb/imgconv" target="_blank" rel="noopener noreferrer">${tr('source')} ↗</a></p></dialog>
+<dialog id="preview-dialog" class="dialog preview-dialog"><div class="preview-header"><div><h2 id="preview-title" dir="auto"></h2><p id="preview-description"></p></div><button class="icon-button" data-close="preview-dialog" ${aria('closePreview')}>${icon('close')}</button></div><div class="preview-tabs"><button id="preview-original" class="selected">${tr('original')}</button><button id="preview-result">${tr('converted')}</button></div><div class="preview-image-wrap"><img id="preview-image" alt=""/></div><div class="preview-footer"><span>${tr('previewHint')}</span><button class="button button-small button-outline" id="preview-download">${icon('download')} ${tr('downloadImage')}</button></div></dialog>`;
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 const input = (id: string) => $<HTMLInputElement>(`#${id}`);
 let format: Format = 'jpeg', toastTimer: ReturnType<typeof setTimeout>;
-function toast(message: string) {
-  clearTimeout(toastTimer); $('#toast').textContent = message; $('#toast').hidden = false;
-  toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 6500);
+let currentToast: { key: MessageKey; params: Params } | null = null;
+function translatedParams(params: Params): Params {
+  return typeof params.field === 'string' ? { ...params, field: t(params.field as MessageKey) } : params;
+}
+function toast(key: MessageKey, params: Params = {}) {
+  currentToast = { key, params };
+  clearTimeout(toastTimer); $('#toast').textContent = t(key, translatedParams(params)); $('#toast').hidden = false;
+  toastTimer = setTimeout(() => { $('#toast').hidden = true; currentToast = null; }, 6500);
+}
+function errorText(error: Issue) { return t(error.code, translatedParams(error.params)); }
+function applyLanguage() {
+  document.documentElement.lang = getLocale(); document.documentElement.dir = languageInfo().direction;
+  document.title = t('appTitle'); document.querySelector('meta[name="description"]')?.setAttribute('content', t('metaDescription'));
+  for (const element of document.querySelectorAll<HTMLElement>('[data-i18n]')) element.textContent = t(element.dataset.i18n as MessageKey);
+  for (const element of document.querySelectorAll<HTMLElement>('[data-i18n-aria]')) element.setAttribute('aria-label', t(element.dataset.i18nAria as MessageKey));
+  for (const element of document.querySelectorAll<HTMLInputElement>('[data-i18n-placeholder]')) element.placeholder = t(element.dataset.i18nPlaceholder as MessageKey);
+  $<HTMLSelectElement>('#language').value = getLocale();
+  if (currentToast) $('#toast').textContent = t(currentToast.key, translatedParams(currentToast.params));
+  render();
+  if ($<HTMLDialogElement>('#preview-dialog').open && activePreview !== null) preview(activePreview, previewConverted);
+}
+function validNumber(id: string, field: MessageKey, min: number, max: number) {
+  const value = Number(input(id).value);
+  if (!input(id).value || !Number.isInteger(value) || value < min || value > max) throw new AppError('invalidNumber', { field, min, max });
+  return value;
 }
 function settings(): Settings {
   const resize = $<HTMLSelectElement>('#resize').value as Settings['resize'];
-  const number = (id: string, min: number, max: number) => {
-    const value = Number(input(id).value);
-    if (!input(id).value || !Number.isInteger(value) || value < min || value > max) throw new Error(`Enter a ${id.replace('-', ' ')} between ${min.toLocaleString()} and ${max.toLocaleString()}.`);
-    return value;
-  };
-  const width = resize === 'fit' || resize === 'exact' ? number('width', 1, 32767) : 1920;
-  const height = resize === 'fit' || resize === 'exact' ? number('height', 1, 32767) : 1080;
-  const percentage = resize === 'percentage' ? number('percentage', 1, 400) : 50;
-  const maxBytes = input('limit-enabled').checked ? number('max-size', 1, 1e9) * Number($<HTMLSelectElement>('#size-unit').value) : null;
+  const width = ['fit','exact'].includes(resize) ? validNumber('width','width',1,32767) : 1920;
+  const height = ['fit','exact'].includes(resize) ? validNumber('height','height',1,32767) : 1080;
+  const percentage = resize === 'percentage' ? validNumber('percentage','scalePercentage',1,400) : 50;
+  const maxBytes = input('limit-enabled').checked ? validNumber('max-size','maxSize',1,1e9) * Number($<HTMLSelectElement>('#size-unit').value) : null;
   return { format, quality: Number(input('quality').value) / 100, resize, width, height, percentage, upscale: input('upscale').checked, maxBytes, autoResize: input('auto-resize').checked, background: input('background').value, suffix: input('suffix').value.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() };
 }
-
 function releaseResult(job: Job) {
   if (job.outputUrl) URL.revokeObjectURL(job.outputUrl);
   if (job.outputThumbnail) URL.revokeObjectURL(job.outputThumbnail);
   job.result = undefined; job.outputUrl = undefined; job.outputThumbnail = undefined; job.outputName = undefined;
 }
 function invalidate() {
-  for (const job of jobs) {
-    releaseResult(job);
-    if (job.info) { job.status = 'ready'; job.error = undefined; }
-  }
+  for (const job of jobs) { releaseResult(job); if (job.info) { job.status = 'ready'; job.error = undefined; } }
   render();
 }
 function updateControls() {
   const mode = $<HTMLSelectElement>('#resize').value;
   $('#dimension-controls').hidden = !['fit','exact'].includes(mode);
-  $('#percentage-control').hidden = mode !== 'percentage';
-  $('#upscale-control').hidden = mode === 'original';
-  $('#resize-hint').textContent = mode === 'exact' ? 'Stretches to these dimensions. May change the aspect ratio.' : 'Keeps the aspect ratio. Fits inside this box.';
+  $('#percentage-control').hidden = mode !== 'percentage'; $('#upscale-control').hidden = mode === 'original';
+  $('#resize-hint').textContent = t(mode === 'exact' ? 'exactHint' : 'fitHint');
   $('#limit-controls').hidden = !input('limit-enabled').checked;
   const lossless = ['png','bmp','tiff'].includes(format);
-  input('quality').disabled = lossless;
-  $('.quality-section').classList.toggle('is-disabled', lossless);
-  $('#quality-value').innerHTML = lossless ? '<span>Lossless</span>' : `${input('quality').value}<span>%</span>`;
-  $('#format-hint').textContent = ({ jpeg: 'The everyday favorite. Small files, ready for anything.', png: 'Lossless detail, with room for transparency.', webp: 'Made for the web. Light, sharp, and transparent.', gif: 'A still image with up to 256 colors. Quality sets the palette size.', bmp: 'Uncompressed pixels. Broad compatibility, larger files.', tiff: 'Lossless, uncompressed images with transparency.' })[format];
+  input('quality').disabled = lossless || busy || importing || zipBusy || sampleBusy; $('.quality-section').classList.toggle('is-disabled', lossless);
+  $('#quality-value').textContent = lossless ? t('lossless') : new Intl.NumberFormat(languageInfo().numberLocale, { style: 'percent' }).format(Number(input('quality').value) / 100);
+  $('#format-hint').textContent = t(formatKeys[format]);
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-format]')) {
     const selected = button.dataset.format === format; button.classList.toggle('selected', selected); button.setAttribute('aria-pressed', String(selected));
   }
 }
-
 function render() {
   const done = jobs.filter(job => job.status === 'done'), ready = jobs.filter(job => job.info);
-  const locked = busy || importing || zipBusy;
-  $('#file-count').textContent = String(jobs.length);
-  $('#clear-button').hidden = jobs.length === 0;
-  $<HTMLButtonElement>('#clear-button').disabled = locked;
-  $<HTMLButtonElement>('#add-button').disabled = locked;
-  $<HTMLButtonElement>('#sample-button').disabled = locked;
-  $<HTMLButtonElement>('#reset-button').disabled = locked;
-  $('#dropzone').classList.toggle('compact', jobs.length > 0);
-  $('#dropzone').setAttribute('aria-disabled', String(locked));
-  $('#batch-toolbar').hidden = jobs.length === 0;
-  $('#sample-row').hidden = jobs.length > 0;
-  $('#batch-description').textContent = `${jobs.length} ${jobs.length === 1 ? 'image' : 'images'} · ${bytes(jobs.reduce((sum, job) => sum + job.file.size, 0))} original`;
+  const locked = busy || importing || zipBusy || sampleBusy;
+  $('#file-count').textContent = number(jobs.length); $('#clear-button').hidden = jobs.length === 0;
+  for (const id of ['clear-button','add-button','sample-button','reset-button']) $<HTMLButtonElement>(`#${id}`).disabled = locked;
+  $('#dropzone').classList.toggle('compact', jobs.length > 0); $('#dropzone').setAttribute('aria-disabled', String(locked));
+  $('#batch-toolbar').hidden = jobs.length === 0; $('#sample-row').hidden = jobs.length > 0;
+  $('#batch-description').textContent = `${t('countImages',{count:jobs.length})} · ${t('originalSize',{size:bytes(jobs.reduce((sum,job) => sum + job.file.size,0))})}`;
   $('#image-grid').innerHTML = jobs.map(job => {
-    const title = job.file.name;
-    const label = { loading: 'Reading image…', ready: 'Ready to convert', processing: 'Converting…', done: 'All set', error: 'Needs attention' }[job.status];
-    return `<article class="image-card ${job.status}" data-id="${job.id}"><div class="image-card-art checkerboard">${job.thumbnail ? `<button class="image-preview-button" data-preview="${job.id}" aria-label="Preview ${escape(title)}"><img src="${job.outputThumbnail || job.thumbnail}" alt="${escape(title)}"/><span class="preview-affordance">${icon('expand',17)}</span></button>` : `<span class="file-placeholder">${icon('images',32)}</span>`}<span class="file-type">${escape(job.result ? extensions[format].toUpperCase() : title.split('.').pop()?.toUpperCase().slice(0,6) || 'IMAGE')}</span><button class="remove-image icon-button" data-remove="${job.id}" aria-label="Remove ${escape(title)}" ${locked ? 'disabled' : ''}>${icon('close',14)}</button></div><div class="image-card-details"><h3 title="${escape(title)}">${escape(title)}</h3><p>${job.info ? `${job.info.width.toLocaleString()} × ${job.info.height.toLocaleString()}` : 'Reading dimensions'} <span>·</span> ${bytes(job.file.size)}</p><div class="image-status"><span class="status-${job.status}">${job.status === 'done' ? icon('check',12) : job.status === 'processing' || job.status === 'loading' ? '<span class="spinner"></span>' : '<span class="tiny-dot"></span>'}${label}</span>${job.result ? `<button class="card-download" data-download="${job.id}" aria-label="Download ${escape(job.outputName || title)}">${bytes(job.result.blob.size)} ${icon('download',13)}</button>` : ''}</div>${job.result ? `<p class="result-dimensions">${job.result.width} × ${job.result.height} px${job.result.reduced ? ' · resized to fit limit' : ''}</p>` : ''}${job.error ? `<p class="image-error">${escape(job.error)}</p>` : ''}</div></article>`;
+    const title = job.file.name, label = t(statusKeys[job.status]);
+    return `<article class="image-card ${job.status}" data-id="${job.id}"><div class="image-card-art checkerboard">${job.thumbnail ? `<button class="image-preview-button" data-preview="${job.id}" aria-label="${escape(t('previewFile',{file:title}))}"><img src="${job.outputThumbnail || job.thumbnail}" alt="${escape(title)}"/><span class="preview-affordance">${icon('expand')}</span></button>` : `<span class="file-placeholder">${icon('images',32)}</span>`}<bdi class="file-type" dir="ltr">${escape(job.result ? extensions[format].toUpperCase() : title.split('.').pop()?.toUpperCase().slice(0,6) || '—')}</bdi><button class="remove-image icon-button" data-remove="${job.id}" aria-label="${escape(t('removeFile',{file:title}))}" ${locked ? 'disabled' : ''}>${icon('close',18)}</button></div><div class="image-card-details"><h3 dir="auto" title="${escape(title)}">${escape(title)}</h3><p>${job.info ? dimensions(job.info.width,job.info.height) : escape(t('readingDimensions'))} · <bdi>${bytes(job.file.size)}</bdi></p><div class="image-status"><span class="status-${job.status}">${job.status === 'done' ? icon('check',18) : ['processing','loading'].includes(job.status) ? '<span class="spinner"></span>' : '<span class="tiny-dot"></span>'}${escape(label)}</span>${job.result ? `<button class="card-download" data-download="${job.id}" aria-label="${escape(t('downloadFile',{file:job.outputName || title}))}"><bdi>${bytes(job.result.blob.size)}</bdi> ${icon('download',18)}</button>` : ''}</div>${job.result ? `<p class="result-dimensions">${dimensions(job.result.width,job.result.height)}${job.result.reduced ? ` · ${escape(t('resultResized'))}` : ''}</p>` : ''}${job.error ? `<p class="image-error">${escape(errorText(job.error))}</p>` : ''}</div></article>`;
   }).join('');
-  $('#export-count').textContent = jobs.length ? `${ready.length} ${ready.length === 1 ? 'image' : 'images'} · one tidy download` : 'Your batch, ready when you are.';
+  $('#export-count').textContent = jobs.length ? t('exportCount',{count:ready.length}) : t('exportEmpty');
   const convertButton = $<HTMLButtonElement>('#convert-button');
   convertButton.disabled = locked || ready.length === 0;
-  convertButton.innerHTML = busy ? '<span class="spinner"></span> Converting images…' : `${icon('spark',18)} ${done.length ? 'Convert again' : `Convert${ready.length ? ' ' + ready.length : ''} ${ready.length === 1 ? 'image' : 'images'}`} ${icon('arrow',18)}`;
+  convertButton.innerHTML = busy ? `<span class="spinner"></span> ${escape(t('statusProcessing'))}` : `${icon('spark')} ${escape(done.length ? t('convertAgain') : ready.length ? t('convertCount',{count:ready.length}) : t('convert'))} ${icon('arrow')}`;
   const downloadButton = $<HTMLButtonElement>('#download-button');
   downloadButton.hidden = done.length === 0 || busy; downloadButton.disabled = locked;
-  $('#zip-size').textContent = bytes(done.reduce((sum, job) => sum + job.result!.blob.size, 0));
-  $('#export-note').textContent = importing ? 'Reading your images locally…' : done.length ? `${done.length} converted${jobs.length > done.length ? ` · ${jobs.length - done.length} excluded` : ''}. Your ZIP is ready.` : ready.length ? 'Same settings for every image. Originals stay untouched.' : 'Add a few images to get started.';
+  downloadButton.innerHTML = zipBusy ? `<span class="spinner"></span> ${escape(t('packing'))}` : `${icon('download')} ${escape(t('downloadZip'))} <bdi class="zip-size">${bytes(done.reduce((sum,job) => sum + job.result!.blob.size,0))}</bdi>`;
+  $('#export-note').textContent = importing || sampleBusy ? t('readingLocal') : done.length ? t('exportReady',{count:done.length}) + (jobs.length > done.length ? ` ${t('excluded',{count:jobs.length - done.length})}` : '') : ready.length ? t('sameSettings') : t('addToStart');
   $('#batch-summary').hidden = !done.length || busy;
   if (done.length && !busy) {
-    const original = done.reduce((sum, job) => sum + job.file.size, 0), output = done.reduce((sum, job) => sum + job.result!.blob.size, 0);
+    const original = done.reduce((sum,job) => sum + job.file.size,0), output = done.reduce((sum,job) => sum + job.result!.blob.size,0);
     const savings = original ? Math.round((1 - output / original) * 100) : 0;
-    $('#batch-summary').innerHTML = `<span class="summary-icon">${icon('check',20)}</span><div><strong>${done.length === jobs.length ? 'Good things come in batches.' : `${done.length} images are ready.`}</strong><p>${bytes(original)} ${icon('arrow',12)} ${bytes(output)}${savings > 0 ? ` <span class="savings">${savings}% lighter</span>` : ''}</p></div><span class="summary-format">${extensions[format].toUpperCase()}</span>`;
+    $('#batch-summary').innerHTML = `<span class="summary-icon">${icon('check',24)}</span><div><strong>${escape(t('batchReady'))}</strong><p><bdi>${bytes(original)}</bdi> ${icon('arrow',18)} <bdi>${bytes(output)}</bdi>${savings > 0 ? `<span class="savings">${escape(t('savings',{percent:savings}))}</span>` : ''}</p></div><bdi class="summary-format" dir="ltr">${extensions[format].toUpperCase()}</bdi>`;
   }
+  $('#progress-panel').hidden = !busy;
+  $('#progress-label').textContent = t('progress', { current: progressState.current, total: progressState.total });
+  $<HTMLProgressElement>('#progress-bar').value = progressState.total ? progressState.completed / progressState.total * 100 : 0;
   for (const el of document.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>('#settings-form input, #settings-form select, #settings-form button')) el.disabled = locked;
-  if (!locked) updateControls();
+  updateControls();
 }
-
 async function addFiles(files: File[]) {
   if (busy || importing || zipBusy || !files.length) return;
-  importing = true; render();
-  let duplicates = 0;
+  importing = true; render(); let duplicates = 0;
   for (const file of files) {
     if (jobs.some(job => job.file.name === file.name && job.file.size === file.size && job.file.lastModified === file.lastModified)) { duplicates++; continue; }
-    const job: Job = { id: ++nextJobId, file, status: 'loading' };
-    jobs.push(job); render();
-    try {
-      job.info = await callWorker({ action: 'inspect', file }) as ImageInfo;
-      job.thumbnail = URL.createObjectURL(job.info.thumbnail); job.status = 'ready';
-    } catch (error) { job.status = 'error'; job.error = error instanceof Error ? error.message : 'Could not read this image.'; }
+    const job: Job = { id: ++nextJobId, file, status: 'loading' }; jobs.push(job); render();
+    try { job.info = await callWorker({action:'inspect',file}) as ImageInfo; job.thumbnail = URL.createObjectURL(job.info.thumbnail); job.status = 'ready'; }
+    catch (error) { job.status = 'error'; job.error = issue(error); }
     render();
   }
-  importing = false; render();
-  if (duplicates) toast(`${duplicates} duplicate ${duplicates === 1 ? 'file was' : 'files were'} skipped.`);
+  importing = false; render(); if (duplicates) toast('duplicatesSkipped',{count:duplicates});
 }
-
 function uniqueName(file: File, s: Settings, names: Set<string>) {
   const base = (file.name.replace(/\.[^.]+$/, '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').trim() || 'image') + s.suffix;
-  const ext = extensions[s.format];
-  let name = `${base}.${ext}`, i = 2;
-  while (names.has(name.toLocaleLowerCase())) name = `${base}-${i++}.${ext}`;
-  names.add(name.toLocaleLowerCase()); return name;
+  const ext = extensions[s.format]; let name = `${base}.${ext}`, i = 2;
+  while (names.has(name.toLowerCase())) name = `${base}-${i++}.${ext}`;
+  names.add(name.toLowerCase()); return name;
 }
-
 async function convertBatch() {
   let s: Settings;
-  try { s = settings(); } catch (error) { toast((error as Error).message); return; }
+  try { s = settings(); } catch (error) { const problem = issue(error); toast(problem.code,problem.params); return; }
   busy = true; cancelled = false;
   for (const job of jobs) { releaseResult(job); if (job.info) { job.status = 'ready'; job.error = undefined; } }
   const batch = jobs.filter(job => job.info), names = new Set<string>();
-  $('#progress-panel').hidden = false; input('progress-bar').value = '0'; render();
-  let completed = 0;
+  progressState = {current:0,total:batch.length,completed:0}; render();
   for (const job of batch) {
     if (cancelled) break;
-    job.status = 'processing'; $('#progress-label').textContent = `Giving image ${completed + 1} of ${batch.length} a fresh start…`; render();
+    job.status = 'processing'; progressState.current = progressState.completed + 1; render();
     try {
-      const result = await callWorker({ action: 'convert', file: job.file, settings: s }) as ConversionResult;
+      const result = await callWorker({action:'convert',file:job.file,settings:s}) as ConversionResult;
       job.result = result; job.outputUrl = URL.createObjectURL(result.blob); job.outputThumbnail = URL.createObjectURL(result.thumbnail);
-      job.outputName = uniqueName(job.file, s, names); job.status = 'done';
+      job.outputName = uniqueName(job.file,s,names); job.status = 'done';
     } catch (error) {
-      if (cancelled) job.status = 'ready';
-      else { job.status = 'error'; job.error = (error as Error).message; }
+      if (cancelled) job.status = 'ready'; else { job.status = 'error'; job.error = issue(error); }
     }
-    completed++; input('progress-bar').value = String(completed / batch.length * 100); render();
+    progressState.completed++; render();
   }
-  busy = false; $('#progress-panel').hidden = true; render();
-  if (cancelled) toast('Batch stopped. Completed images are still available.');
-  else if (jobs.some(job => job.status === 'error')) toast('Some images need attention. See the message below each file.');
+  busy = false; render();
+  if (cancelled) toast('cancelled'); else if (jobs.some(job => job.status === 'error')) toast('attention');
 }
-
 function download(url: string, name: string) {
   const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; document.body.append(anchor); anchor.click(); anchor.remove();
 }
 async function downloadZip() {
-  const converted = jobs.filter(job => job.result);
-  if (!converted.length || zipBusy || busy) return;
+  const converted = jobs.filter(job => job.result); if (!converted.length || zipBusy || busy) return;
   zipBusy = true; render();
-  const button = $('#download-button'), original = button.innerHTML; button.innerHTML = '<span class="spinner"></span> Packing your images…';
   try {
     const { zip } = await import('fflate');
     // A null-prototype map preserves filenames such as __proto__ safely.
     const entries: Record<string, Uint8Array> = Object.create(null);
     for (const job of converted) entries[job.outputName!] = new Uint8Array(await job.result!.blob.arrayBuffer());
-    const result = await new Promise<Uint8Array<ArrayBuffer>>((resolve, reject) => {
-      zip(entries, { level: 0 }, (error, data) => error ? reject(error) : resolve(data as Uint8Array<ArrayBuffer>));
+    const result = await new Promise<Uint8Array<ArrayBuffer>>((resolve,reject) => {
+      zip(entries,{level:0},(error,data) => error ? reject(error) : resolve(data as Uint8Array<ArrayBuffer>));
     });
-    const url = URL.createObjectURL(new Blob([result], { type: 'application/zip' }));
-    download(url, `still-images-${new Date().toISOString().slice(0, 10)}.zip`); setTimeout(() => URL.revokeObjectURL(url), 60000);
-    toast(`${converted.length} ${converted.length === 1 ? 'image' : 'images'}, neatly zipped. Enjoy!`);
-  } catch (error) { toast(`Could not create ZIP: ${(error as Error).message}`); }
-  finally { zipBusy = false; button.innerHTML = original; render(); }
+    const url = URL.createObjectURL(new Blob([result],{type:'application/zip'}));
+    download(url,`resz-images-${new Date().toISOString().slice(0,10)}.zip`); setTimeout(() => URL.revokeObjectURL(url),60000);
+    toast('zipDone',{count:converted.length});
+  } catch { toast('zipError'); } finally { zipBusy = false; render(); }
 }
-
 function preview(id: number, converted = false) {
   const job = jobs.find(job => job.id === id); if (!job?.thumbnail) return;
-  activePreview = id;
+  activePreview = id; previewConverted = converted;
   $('#preview-title').textContent = converted && job.outputName ? job.outputName : job.file.name;
   const info = converted && job.result ? job.result : job.info!;
-  $('#preview-description').textContent = `${info.width} × ${info.height} px · ${bytes(converted && job.result ? job.result.blob.size : job.file.size)}`;
+  $('#preview-description').innerHTML = `${dimensions(info.width,info.height)} · <bdi>${bytes(converted && job.result ? job.result.blob.size : job.file.size)}</bdi>`;
   $<HTMLImageElement>('#preview-image').src = converted && job.outputThumbnail ? job.outputThumbnail : job.thumbnail;
   $<HTMLImageElement>('#preview-image').alt = job.file.name;
-  $('#preview-original').classList.toggle('selected', !converted); $('#preview-result').classList.toggle('selected', converted);
+  $('#preview-original').classList.toggle('selected',!converted); $('#preview-result').classList.toggle('selected',converted);
   $<HTMLButtonElement>('#preview-result').disabled = !job.result; $('#preview-download').hidden = !job.result;
   if (!$<HTMLDialogElement>('#preview-dialog').open) $<HTMLDialogElement>('#preview-dialog').showModal();
 }
 
+$('#language').addEventListener('change', () => {
+  setLocale($<HTMLSelectElement>('#language').value as Locale);
+  try { localStorage.setItem('resz-language',getLocale()); } catch { /* Language selection still works without storage. */ }
+  const url = new URL(location.href); url.searchParams.set('lang',getLocale()); history.replaceState(null,'',url); applyLanguage();
+});
 $('#add-button').addEventListener('click', () => input('file-input').click());
 input('file-input').addEventListener('change', event => { void addFiles(Array.from((event.target as HTMLInputElement).files || [])); input('file-input').value = ''; });
-$('#dropzone').addEventListener('click', () => { if (!busy && !importing && !zipBusy) input('file-input').click(); });
+$('#dropzone').addEventListener('click', () => { if (!busy && !importing && !zipBusy && !sampleBusy) input('file-input').click(); });
 $('#dropzone').addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); $('#dropzone').click(); } });
 let dragDepth = 0;
 document.addEventListener('dragenter', event => { event.preventDefault(); if (event.dataTransfer?.types.includes('Files')) { dragDepth++; $('#dropzone').classList.add('dragging'); } });
 document.addEventListener('dragover', event => event.preventDefault());
 document.addEventListener('dragleave', event => { event.preventDefault(); if (--dragDepth <= 0) { dragDepth = 0; $('#dropzone').classList.remove('dragging'); } });
-document.addEventListener('drop', event => { event.preventDefault(); dragDepth = 0; $('#dropzone').classList.remove('dragging'); if (event.dataTransfer) void addFiles(Array.from(event.dataTransfer.files)); });
+document.addEventListener('drop', event => { event.preventDefault(); dragDepth = 0; $('#dropzone').classList.remove('dragging'); if (event.dataTransfer && !sampleBusy) void addFiles(Array.from(event.dataTransfer.files)); });
 $('#clear-button').addEventListener('click', () => { for (const job of jobs) { if (job.thumbnail) URL.revokeObjectURL(job.thumbnail); releaseResult(job); } jobs = []; render(); });
 $('#image-grid').addEventListener('click', event => {
   const target = event.target as HTMLElement;
   const remove = target.closest<HTMLElement>('[data-remove]'), previewButton = target.closest<HTMLElement>('[data-preview]'), downloadButton = target.closest<HTMLElement>('[data-download]');
-  if (remove && !busy && !importing && !zipBusy) {
+  if (remove && !busy && !importing && !zipBusy && !sampleBusy) {
     const job = jobs.find(item => item.id === Number(remove.dataset.remove))!;
     if (job.thumbnail) URL.revokeObjectURL(job.thumbnail); releaseResult(job); jobs = jobs.filter(item => item !== job); render();
-  } else if (previewButton) preview(Number(previewButton.dataset.preview), Boolean(jobs.find(job => job.id === Number(previewButton.dataset.preview))?.result));
-  else if (downloadButton) { const job = jobs.find(item => item.id === Number(downloadButton.dataset.download))!; if (job.outputUrl) download(job.outputUrl, job.outputName!); }
+  } else if (previewButton) preview(Number(previewButton.dataset.preview),Boolean(jobs.find(job => job.id === Number(previewButton.dataset.preview))?.result));
+  else if (downloadButton) { const job = jobs.find(item => item.id === Number(downloadButton.dataset.download))!; if (job.outputUrl) download(job.outputUrl,job.outputName!); }
 });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-format]')) button.addEventListener('click', () => { format = button.dataset.format as Format; updateControls(); invalidate(); });
 $('#settings-form').addEventListener('submit', event => event.preventDefault());
 $('#settings-form').addEventListener('input', () => { updateControls(); invalidate(); });
-$('#reset-button').addEventListener('click', () => { $<HTMLFormElement>('#settings-form').reset(); format = 'jpeg'; updateControls(); invalidate(); toast('Back to a fresh set of settings.'); });
+$('#reset-button').addEventListener('click', () => { $<HTMLFormElement>('#settings-form').reset(); format = 'jpeg'; updateControls(); invalidate(); toast('settingsReset'); });
 $('#convert-button').addEventListener('click', () => void convertBatch());
 $('#download-button').addEventListener('click', () => void downloadZip());
-$('#cancel-button').addEventListener('click', () => { cancelled = true; worker.terminate(); for (const handler of pending.values()) handler.reject(new Error('Cancelled')); pending.clear(); startWorker(); });
+$('#cancel-button').addEventListener('click', () => { cancelled = true; worker.terminate(); for (const handler of pending.values()) handler.reject(new AppError('errorWorker')); pending.clear(); startWorker(); });
 $('#help-button').addEventListener('click', () => $<HTMLDialogElement>('#about-dialog').showModal());
 for (const button of document.querySelectorAll<HTMLElement>('[data-close]')) button.addEventListener('click', () => $<HTMLDialogElement>(`#${button.dataset.close}`).close());
 for (const dialog of document.querySelectorAll<HTMLDialogElement>('dialog')) dialog.addEventListener('click', event => { if (event.target === dialog) { const bounds = dialog.getBoundingClientRect(); if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close(); } });
 $('#preview-original').addEventListener('click', () => activePreview !== null && preview(activePreview));
-$('#preview-result').addEventListener('click', () => activePreview !== null && preview(activePreview, true));
-$('#preview-download').addEventListener('click', () => { const job = jobs.find(job => job.id === activePreview); if (job?.outputUrl) download(job.outputUrl, job.outputName!); });
+$('#preview-result').addEventListener('click', () => activePreview !== null && preview(activePreview,true));
+$('#preview-download').addEventListener('click', () => { const job = jobs.find(job => job.id === activePreview); if (job?.outputUrl) download(job.outputUrl,job.outputName!); });
 
 async function sampleBatch() {
-  $<HTMLButtonElement>('#sample-button').disabled = true;
+  sampleBusy = true; render();
   const samples = [
     { name: 'alpine-morning.png', sky: '#d8e5dc', sun: '#fff3c1', far: '#8ca18d', near: '#3e6554', style: 0 },
     { name: 'slow-afternoon.png', sky: '#f1d9c2', sun: '#fff2cd', far: '#bc8e71', near: '#7a5c43', style: 1 },
@@ -310,8 +314,9 @@ async function sampleBatch() {
     const blob=await new Promise<Blob>(resolve=>canvas.toBlob(value=>resolve(value!),'image/png'));
     files.push(new File([blob],s.name,{type:'image/png',lastModified:1}));
   }
+  sampleBusy = false;
   await addFiles(files);
 }
-$('#sample-button').addEventListener('click', () => void sampleBatch());
 
-render();
+$('#sample-button').addEventListener('click', () => { void sampleBatch().catch(() => { sampleBusy = false; render(); toast('errorWorker'); }); });
+applyLanguage();

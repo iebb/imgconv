@@ -2,11 +2,11 @@ import { unzipSync, zipSync } from 'fflate';
 import UTIF from 'utif';
 import type { ConversionResult, Format, ImageInfo, Settings } from '../src/types';
 
-const base: Settings = { format: 'jpeg', quality: .85, resize: 'original', width: 1920, height: 1080, percentage: 50, upscale: false, maxBytes: null, autoResize: true, background: '#ffffff', suffix: '-still' };
+const base: Settings = { format: 'jpeg', quality: .85, resize: 'original', width: 1920, height: 1080, percentage: 50, upscale: false, maxBytes: null, autoResize: true, background: '#ffffff', suffix: '-resz' };
 const worker = new Worker(new URL('../src/image.worker.ts', import.meta.url), { type: 'module' });
 let id = 0, passed = 0, failed = 0;
 const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
-worker.onmessage = ({ data }) => { const handler = pending.get(data.id)!; pending.delete(data.id); data.ok ? handler.resolve(data.result) : handler.reject(new Error(data.error)); };
+worker.onmessage = ({ data }) => { const handler = pending.get(data.id)!; pending.delete(data.id); data.ok ? handler.resolve(data.result) : handler.reject(new Error(data.error.code)); };
 const request = (file: File, settings?: Partial<Settings>) => new Promise<ImageInfo | ConversionResult>((resolve, reject) => { const next = ++id; pending.set(next, { resolve, reject }); worker.postMessage({ id: next, action: settings ? 'convert' : 'inspect', file, settings: settings ? { ...base, ...settings } : undefined }); });
 const assert = (condition: unknown, message: string) => { if (!condition) throw new Error(message); };
 async function test(name: string, action: () => Promise<void>) {
@@ -40,10 +40,10 @@ for(const format of ['jpeg','png','webp','gif','bmp','tiff'] as Format[]) await 
 });
 await test('Hard byte cap checks actual JPG bytes and reduces quality',async()=>{const result=await request(original,{maxBytes:6000,autoResize:false}) as ConversionResult;assert(result.blob.size<=6000,'over byte cap');assert(result.width===480&&result.height===320,'unexpected resize');assert(result.quality<.85,'quality not adjusted');});
 await test('PNG byte cap automatically reduces dimensions',async()=>{const result=await request(original,{format:'png',maxBytes:3000}) as ConversionResult;assert(result.blob.size<=3000,'over byte cap');assert(result.reduced,'not reduced');});
-await test('Impossible cap fails instead of exporting oversized file',async()=>{let error='';try{await request(original,{maxBytes:1});}catch(e){error=(e as Error).message;}assert(error.includes('Cannot meet'),'missing size failure');});
-await test('Cap with automatic resize disabled preserves dimensions or fails',async()=>{let error='';try{await request(original,{format:'png',maxBytes:100,autoResize:false});}catch(e){error=(e as Error).message;}assert(error.includes('at these dimensions'),'unexpected cap behavior');});
+await test('Impossible cap fails instead of exporting oversized file',async()=>{let error='';try{await request(original,{maxBytes:1});}catch(e){error=(e as Error).message;}assert(error === 'errorLimitTiny','missing size failure');});
+await test('Cap with automatic resize disabled preserves dimensions or fails',async()=>{let error='';try{await request(original,{format:'png',maxBytes:100,autoResize:false});}catch(e){error=(e as Error).message;}assert(error === 'errorLimitFixed','unexpected cap behavior');});
 await test('Fit never upscales by default',async()=>{const result=await request(original,{resize:'fit',width:1200,height:1200});assert(result.width===480&&result.height===320,'upscaled');});
 await test('Percentage and exact resize',async()=>{const percent=await request(original,{resize:'percentage',percentage:25});assert(percent.width===120&&percent.height===80,'wrong percent');const exact=await request(original,{resize:'exact',width:100,height:100});assert(exact.width===100&&exact.height===100,'wrong exact dimensions');});
 await test('Corrupt input fails and worker recovers for the next file',async()=>{let errored=false;try{await request(new File(['broken'],'bad.heic'));}catch{errored=true;}assert(errored,'accepted corrupt image');assert((await request(original)).width===480,'worker did not recover');});
 await test('ZIP round trip preserves every output byte',async()=>{const zip=zipSync(results,{level:0}),entries=unzipSync(zip);assert(Object.keys(entries).length===6,'missing ZIP entries');for(const name of Object.keys(results))assert(entries[name].every((value,i)=>value===results[name][i]),`ZIP bytes differ for ${name}`);});
-worker.terminate();document.querySelector('#summary')!.textContent=`Finished: ${passed} passed, ${failed} failed.`;document.title=`Still tests: ${passed} passed, ${failed} failed`;
+worker.terminate();document.querySelector('#summary')!.textContent=`Finished: ${passed} passed, ${failed} failed.`;document.title=`resz.im tests: ${passed} passed, ${failed} failed`;

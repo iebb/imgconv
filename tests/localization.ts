@@ -1,0 +1,117 @@
+import { languages, t, type Locale } from '../src/i18n';
+let passed = 0, failed = 0;
+const assert = (condition: unknown, message: string) => { if (!condition) throw new Error(message); };
+const pause = (ms: number) => new Promise(resolve => setTimeout(resolve,ms));
+async function until(check: () => boolean, message: string, timeout = 20000) {
+  const start = performance.now();
+  while (!check()) { if (performance.now() - start > timeout) throw new Error(message); await pause(40); }
+}
+async function test(name: string, action: () => Promise<void>) {
+  const row = document.createElement('li'); row.textContent = 'Running: ' + name; document.querySelector('#results')!.append(row);
+  try { await action(); row.textContent = 'PASS — ' + name; passed++; }
+  catch (error) { row.textContent = 'FAIL — ' + name + ': ' + error; row.className = 'fail'; failed++; }
+  document.querySelector('#summary')!.textContent = `${passed} passed, ${failed} failed (running)`;
+}
+let frame: HTMLIFrameElement;
+async function load(locale: Locale, width: number) {
+  frame?.remove(); frame = document.createElement('iframe'); frame.width = String(width); frame.src = '/?lang=' + locale;
+  document.querySelector('#fixture')!.append(frame);
+  await until(() => Boolean(frame.contentDocument?.querySelector('#language')), 'App did not load');
+  await pause(80);
+  return frame.contentDocument!;
+}
+function checkLayout(doc: Document) {
+  const root = doc.documentElement, win = doc.defaultView!;
+  assert(root.scrollWidth <= root.clientWidth + 1, `Horizontal overflow: ${root.scrollWidth} / ${root.clientWidth}`);
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+  let textNode: Node | null;
+  while ((textNode = walker.nextNode())) {
+    if (!textNode.textContent?.trim()) continue;
+    const parent = textNode.parentElement!;
+    if (parent.closest('.sr-only,script,style,option')) continue;
+    const style = win.getComputedStyle(parent);
+    if (!parent.getClientRects().length || style.visibility === 'hidden') continue;
+    assert(parseFloat(style.fontSize) >= 14, `Small text: ${parent.className} ${style.fontSize}`);
+  }
+  for (const element of doc.querySelectorAll<HTMLElement>('button,.field-hint,.export-note,.animation-note,.settings-heading,.intro-copy')) {
+    if (!element.getClientRects().length) continue;
+    assert(element.scrollWidth <= element.clientWidth + 2, 'Clipped width: ' + element.className + ' ' + element.textContent);
+    assert(element.scrollHeight <= element.clientHeight + 2, 'Clipped height: ' + element.className);
+  }
+}
+function change(doc: Document, selector: string, value: string) {
+  const element = doc.querySelector<HTMLInputElement | HTMLSelectElement>(selector)!; element.value = value;
+  element.dispatchEvent(new Event(selector === '#language' ? 'change' : 'input', {bubbles:true}));
+}
+async function add(doc: Document, file: File) {
+  const input = doc.querySelector<HTMLInputElement>('#file-input')!, transfer = new DataTransfer();
+  transfer.items.add(file); input.files = transfer.files; input.dispatchEvent(new Event('change',{bubbles:true}));
+  await until(() => Boolean(doc.querySelector('.image-card.ready,.image-card.error')), 'Import did not finish');
+}
+for (const language of languages) {
+  for (const width of [390,820,1280]) {
+    await test(language.code + ' at ' + width + 'px: complete UI, readable text, no overflow', async () => {
+      const doc = await load(language.code,width);
+      assert(doc.documentElement.lang === language.code, 'Wrong lang');
+      assert(doc.documentElement.dir === language.direction, 'Wrong direction');
+      assert(doc.title === t('appTitle',{},language.code), 'Wrong title');
+      assert(doc.querySelector('h1')!.textContent === t('heroTitle',{},language.code), 'Hero not translated');
+      assert(doc.querySelector('#add-button')!.textContent!.includes(t('addImages',{},language.code)), 'Button not translated');
+      checkLayout(doc);
+      change(doc,'#resize','fit');
+      doc.querySelector<HTMLInputElement>('#limit-enabled')!.click();
+      doc.querySelector<HTMLDetailsElement>('details')!.open = true;
+      checkLayout(doc);
+      doc.querySelector<HTMLButtonElement>('#help-button')!.click();
+      assert(doc.querySelector('#about-dialog h2')!.textContent === t('aboutTitle',{},language.code), 'About not translated');
+      checkLayout(doc);
+      doc.querySelector<HTMLDialogElement>('#about-dialog')!.close();
+    });
+  }
+}
+await test('Conversion survives language switching; RTL preview, ZIP controls and validation translate', async () => {
+  const doc = await load('en',390);
+  const canvas = document.createElement('canvas'); canvas.width = 240; canvas.height = 160;
+  const ctx = canvas.getContext('2d')!; ctx.fillStyle = '#638b53'; ctx.fillRect(0,0,240,160);
+  const blob = await new Promise<Blob>(resolve => canvas.toBlob(value => resolve(value!),'image/png'));
+  await add(doc,new File([blob],'日本語-photo.png',{type:'image/png'}));
+  change(doc,'#resize','fit'); change(doc,'#width','120'); change(doc,'#height','120');
+  doc.querySelector<HTMLButtonElement>('#convert-button')!.click();
+  await until(() => Boolean(doc.querySelector('.image-card.done')), 'Conversion did not finish');
+  change(doc,'#language','ar');
+  assert(doc.querySelectorAll('.image-card.done').length === 1, 'Result lost on language switch');
+  assert(doc.querySelector<HTMLInputElement>('#width')!.value === '120', 'Settings lost');
+  assert(doc.querySelector('.status-done')!.textContent === t('statusDone',{},'ar'), 'Status not translated');
+  assert(doc.querySelector('#download-button')!.textContent!.includes(t('downloadZip',{},'ar')), 'Download not translated');
+  checkLayout(doc);
+  doc.querySelector<HTMLButtonElement>('[data-preview]')!.click();
+  assert(doc.querySelector('#preview-title')!.textContent === '日本語-photo-resz.jpg', 'Export name is not branded');
+  assert(doc.querySelector('#preview-result')!.textContent === t('converted',{},'ar'), 'Preview not translated');
+  assert(doc.querySelector('#preview-description')!.textContent!.includes('120') || doc.querySelector('#preview-description')!.textContent!.includes('١٢٠'), 'Wrong output size');
+  checkLayout(doc);
+  doc.querySelector<HTMLDialogElement>('#preview-dialog')!.close();
+  change(doc,'#language','zh-Hans');
+  assert(doc.querySelectorAll('.image-card.done').length === 1, 'Result lost after second switch');
+  change(doc,'#width','0'); doc.querySelector<HTMLButtonElement>('#convert-button')!.click();
+  assert(doc.querySelector('#toast')!.textContent!.includes(t('width',{},'zh-Hans')), 'Validation not translated');
+  change(doc,'#language','ur');
+  assert(doc.querySelector('#toast')!.textContent!.includes(t('width',{},'ur')), 'Visible error did not translate');
+  checkLayout(doc);
+});
+await test('Corrupt-file worker errors translate when switching languages', async () => {
+  const doc = await load('fr',820);
+  await add(doc,new File(['broken'],'bad.png',{type:'image/png'}));
+  assert(doc.querySelector('.image-error')!.textContent === t('errorDecode',{},'fr'), 'Worker error not translated');
+  change(doc,'#language','bn');
+  assert(doc.querySelector('.image-error')!.textContent === t('errorDecode',{},'bn'), 'Existing worker error not translated');
+  checkLayout(doc);
+});
+await test('Remembered language and URL override survive reload', async () => {
+  let doc = await load('en',820); change(doc,'#language','id');
+  frame.src = '/';
+  await until(() => Boolean(frame.contentDocument?.querySelector('#language')) && frame.contentDocument!.documentElement.lang === 'id','Saved preference not applied');
+  doc = await load('es',820); assert(doc.documentElement.lang === 'es','URL did not override preference');
+});
+frame.remove(); document.querySelector('#summary')!.textContent = `Finished: ${passed} passed, ${failed} failed.`;
+document.title = `resz.im localization: ${passed} passed, ${failed} failed`;
+

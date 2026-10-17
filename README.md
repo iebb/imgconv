@@ -1,4 +1,4 @@
-# Still — a local image studio
+# resz.im — your local image studio
 
 A browser-only batch image converter. No backend, image uploads, analytics, accounts, CDN scripts, or remote fonts. File decoding, resizing, encoding, and ZIP creation happen on your device.
 
@@ -35,7 +35,8 @@ Open the printed URL (usually `http://127.0.0.1:4173`). Keep the local server ru
 - Export completed files individually or as a ZIP, with safe, collision-free filenames.
 - Settings changes clear old results; cancellation stops the worker and preserves completed files.
 - No metadata is copied from originals; transparency is preserved where the output supports it. Choose the fill color for JPG/BMP.
-- No runtime internet dependencies; responsive layout and keyboard-accessible controls.
+- Ten languages: English, Simplified Chinese, Hindi, Spanish, Arabic, French, Bengali, Portuguese, Indonesian, and Urdu. Language selection follows the browser, can be changed without losing the batch, and is remembered locally. Share a language using `?lang=ar` (or any supported code). Arabic and Urdu use right-to-left layouts.
+- Readable typography: controls use 16 px or larger, with helper text at least 14 px. No remote fonts or runtime internet dependencies; responsive layout and keyboard-accessible controls.
 
 ## Cloudflare Pages
 
@@ -61,6 +62,8 @@ Images are processed sequentially in a dedicated worker, holding full pixel data
 `npm run build` performs TypeScript checks and builds the production app.
 
 `npm test` opens the local browser verification page. Or run `npm run dev` and visit `/tests/runner.html`. The suite exercises the actual image worker in the browser: real HEIC and TIFF inputs; all six output signatures, dimensions, and alpha handling; quality and byte caps; impossible-size failures; resizing policies; corrupt-file recovery; and byte-for-byte ZIP round trips. Test images contain no user data and are excluded from the production build. Fixture provenance is in `tests/fixtures/README.md`.
+
+`npm run test:locales` checks translation coverage, interpolation, and language selection. With the dev server running, `/tests/localization.html` checks all ten languages at mobile, tablet, and desktop widths, plus conversion, errors, and language changes with a batch in memory.
 
 ## Libraries
 

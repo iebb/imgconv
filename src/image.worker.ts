@@ -1,4 +1,5 @@
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
+import { AppError, issue } from './errors';
 import type { ConversionResult, Settings, WorkerRequest, WorkerReply } from './types';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -6,7 +7,7 @@ const mimeTypes = { jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gi
 
 function checkDimensions(width: number, height: number) {
   if (!Number.isFinite(width * height) || width < 1 || height < 1 || width > 32767 || height > 32767 || width * height > 80_000_000) {
-    throw new Error('Image dimensions must be below 32,768 px per side and 80 megapixels.');
+    throw new AppError('errorDimensions');
   }
 }
 
@@ -20,7 +21,7 @@ async function decode(file: File): Promise<ImageBitmap> {
     const { default: UTIF } = await import('utif');
     const buffer = await file.arrayBuffer();
     const page = UTIF.decode(buffer).find(ifd => ifd.t256?.[0] && ifd.t257?.[0]);
-    if (!page) throw new Error('No readable image found in this TIFF.');
+    if (!page) throw new AppError('errorTiff');
     checkDimensions(page.t256[0], page.t257[0]);
     UTIF.decodeImage(buffer, page);
     const canvas = new OffscreenCanvas(page.width, page.height);
@@ -46,8 +47,8 @@ async function decode(file: File): Promise<ImageBitmap> {
       try { checkDimensions(bitmap.width, bitmap.height); } catch (error) { bitmap.close(); throw error; }
       return bitmap;
     }
-    if (nativeError instanceof Error && nativeError.message.includes('megapixels')) throw nativeError;
-    throw new Error('This image could not be decoded. It may be damaged or use an unsupported format.');
+    if (nativeError instanceof AppError) throw nativeError;
+    throw new AppError('errorDecode');
   }
 }
 
@@ -125,7 +126,7 @@ async function encode(canvas: OffscreenCanvas, s: Settings, quality: number): Pr
     return new Blob([buffer], { type: 'image/bmp' });
   }
   const blob = await canvas.convertToBlob({ type: mimeTypes[s.format], quality });
-  if (blob.type !== mimeTypes[s.format]) throw new Error(`${s.format.toUpperCase()} encoding is unavailable in this browser. Try another format.`);
+  if (blob.type !== mimeTypes[s.format]) throw new AppError('errorEncode', { format: s.format.toUpperCase() });
   return blob;
 }
 
@@ -157,14 +158,14 @@ async function convert(source: ImageBitmap, settings: Settings): Promise<Convers
       return { blob, width, height, quality: finalQuality, reduced: width !== initial.width || height !== initial.height, thumbnail: await thumbnail(canvas) };
     }
     if (!settings.autoResize || (width === 1 && height === 1)) {
-      throw new Error(`Cannot meet ${limit.toLocaleString()} bytes${settings.autoResize ? ', even at 1 × 1 px' : ' at these dimensions'}. ${settings.autoResize ? 'Increase the limit or choose another format.' : 'Allow automatic resizing or increase the limit.'}`);
+      throw new AppError(settings.autoResize ? 'errorLimitTiny' : 'errorLimitFixed', { limit });
     }
     const scale = Math.max(0.1, Math.min(0.85, Math.sqrt(limit / blob.size) * 0.92));
     width = Math.max(1, Math.floor(width * scale)); height = Math.max(1, Math.floor(height * scale));
     canvas.width = 1; canvas.height = 1;
     canvas = draw(source, width, height, settings);
   }
-  throw new Error('Could not meet this file-size limit. Try a larger limit.');
+  throw new AppError('errorLimit');
 }
 
 scope.onmessage = async (event: MessageEvent<WorkerRequest>) => {
@@ -177,6 +178,6 @@ scope.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       : await convert(bitmap, request.settings);
     scope.postMessage({ id: request.id, ok: true, result } satisfies WorkerReply);
   } catch (error) {
-    scope.postMessage({ id: request.id, ok: false, error: error instanceof Error ? error.message : 'This image could not be processed.' } satisfies WorkerReply);
+    scope.postMessage({ id: request.id, ok: false, error: issue(error) } satisfies WorkerReply);
   } finally { bitmap?.close(); }
 };
