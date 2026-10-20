@@ -26,17 +26,22 @@ Open the printed URL (usually `http://127.0.0.1:4173`). Keep the local server ru
 
 ## Features
 
-- Multi-file selection and drag and drop; local thumbnails and previews.
-- HEIC/HEIF and TIFF decoding bundled with the app. JPG, PNG, GIF, WebP, AVIF, BMP, and other inputs use the browser's image decoder.
-- JPG, PNG, WebP, GIF, BMP, and TIFF export. Unsupported native WebP encoding fails clearly instead of silently returning a mislabeled PNG.
-- Keep dimensions, fit inside a box, scale by percentage, or stretch to exact dimensions. Enlarging images is disabled by default.
-- Quality controls for JPG and WebP; palette quality for GIF. PNG and TIFF preserve full pixel values; BMP flattens transparency.
-- Optional maximum bytes per output image. JPG/WebP quality and GIF palette size are adjusted first. If enabled, dimensions are progressively reduced. The app only accepts an output whose **actual encoded size is at most the configured limit**. Impossible limits show per-file errors and never export oversized files. KB and MB use decimal units (1,000 and 1,000,000 bytes).
-- Export completed files individually or as a ZIP, with safe, collision-free filenames.
-- Settings changes clear old results; cancellation stops the worker and preserves completed files.
-- No metadata is copied from originals; transparency is preserved where the output supports it. Choose the fill color for JPG/BMP.
-- Ten languages: English, Simplified Chinese, Hindi, Spanish, Arabic, French, Bengali, Portuguese, Indonesian, and Urdu. Language selection follows the browser, can be changed without losing the batch, and is remembered locally. Share a language using `?lang=ar` (or any supported code). Arabic and Urdu use right-to-left layouts.
-- Readable typography: controls use 16 px or larger, with helper text at least 14 px. No remote fonts or runtime internet dependencies; responsive layout and keyboard-accessible controls.
+- Select multiple images, add or drop whole folders, or paste images from the clipboard. Non-image files in folders are skipped.
+- Import HEIC/HEIF, TIFF, JPG, PNG, GIF, WebP, AVIF, BMP and other browser-supported inputs. HEIC and TIFF decoders are bundled locally.
+- Export JPG, optimized PNG, WebP, AVIF, GIF, APNG, BMP and TIFF. PNG/APNG support lossless full-color encoding or palette reduction. Unsupported native WebP encoding reports an error instead of returning a mislabeled PNG.
+- Resize by percentage, width, height, bounding box, exact dimensions, fill-and-crop, or fit-and-pad. Crop/padding position is adjustable; padding can be transparent or a chosen color. Enlargement is off by default.
+- Draw a custom crop for each image, move it, resize it, or enter precise percentages. Rotate in 90-degree steps and flip horizontally or vertically across the batch.
+- Full-resolution before/after comparison with a split slider, fit and 100% views, zoom up to 400%, and drag-to-pan. HEIC/TIFF previews are decoded on demand; thumbnails are not used for detail inspection.
+- Text and image/logo watermarks with size, opacity, color and position controls.
+- Local background removal (U²-Net small) and real 2×/4× AI upscaling (Real-ESRGAN). The models and CPU WebAssembly runtime are served from this site only when needed; selected images never leave the device.
+- GIF, WebP and APNG output preserves supported animated inputs, frame timing, loops and transparency. Other output formats require choosing First frame explicitly.
+- Strict per-image byte limits include the final encoded file, including all animation frames. JPG/WebP/AVIF quality and GIF palettes are adjusted first; optional resizing follows. Impossible limits show per-file errors and are excluded from exports. KB and MB are decimal units.
+- Built-in recipes, automatic settings restoration, named local presets and shareable settings links. Links contain settings in the URL fragment, including watermark text, and never include images. Image/logo files stay in the current tab and must be reselected after a reload.
+- Filename patterns support `{name}`, `{n}`, `{width}`, `{height}`, and `{format}`, plus prefixes, suffixes, numbering and safe collision handling. Optionally retain imported folder structure.
+- Download individual results, export ZIP, or save directly into a folder in supported browsers. Folder export adds a numeric suffix when a target file already exists.
+- Cancellation stops processing and keeps completed results. Changing settings clears old results; applying a manual crop clears only that image's result.
+- Ten complete languages: English, Simplified Chinese, Hindi, Spanish, Arabic, French, Bengali, Portuguese, Indonesian and Urdu. Arabic/Urdu use RTL. Language changes preserve the batch; share a language with `?lang=ar`.
+- Responsive workspace with three settings tabs, keyboard navigation, readable controls and text at least 14 px. No remote fonts, analytics or accounts.
 
 ## Cloudflare Pages
 
@@ -53,17 +58,25 @@ If Wrangler has access to multiple accounts, set `CLOUDFLARE_ACCOUNT_ID` to the 
 
 ## Boundaries
 
-Animations become still images using the first frame. Multi-page TIFF and HEIC collections use the first image. This is an 8-bit browser image workflow; HDR, wide-gamut source values, and print metadata are not preserved. Keep the originals for archival or print work. Output is re-encoded even when choosing the same format.
+Animated GIF, WebP and APNG inputs can retain their frames when exported as GIF, WebP or APNG. GIF/APNG decoding has bundled fallbacks; animated WebP and AVIF decoding depends on browser ImageDecoder support. Unsupported animation reports an error rather than silently flattening. AVIF export is still-image only. Multi-page TIFF and HEIC collections use the first image.
 
-Images are processed sequentially in a dedicated worker, holding full pixel data for only the active image. Original Files and exported Blobs remain in tab memory until removed or the page closes. Maximum dimensions are 32,767 pixels per side and 80 megapixels; practical limits also depend on device memory. ZIP creation needs additional memory proportional to the output batch. Some HEIC compression variants and browser-dependent input formats may be unsupported; these show per-file errors.
+Exports remove metadata and use an 8-bit browser image workflow. HDR, wide-gamut source values and print metadata are not preserved. Keep originals for archival and print work. Output is re-encoded even when selecting the original format.
+
+Maximum dimensions are 32,767 pixels per side and 80 megapixels. Animations are limited to 300 frames and 60 million total pixels; practical limits depend on device memory. Frames are composited before encoding, and animation/ZIP export needs additional memory. Files and export blobs remain in tab memory until removed or the tab closes.
+
+AI upscaling accepts at most 4 megapixels per input frame and can be slow for large batches. Background masks and reconstructed details vary with the subject; the app does not promise exact restoration. AI model provenance, licenses, hashes and preprocessing are in [public/models/manifest.json](public/models/manifest.json). Models and runtime files are included in the static build and require no external service. The app is not an offline-installed PWA.
+
+Direct folder export requires the File System Access API and a secure context (HTTPS or localhost). ZIP remains available in other browsers. If folder export is interrupted, files already written remain in the chosen folder.
 
 ## Verify
 
-`npm run build` performs TypeScript checks and builds the production app.
+`npm run build` checks TypeScript, prepares the bundled AI runtime, and creates the static production build.
 
-`npm test` opens the local browser verification page. Or run `npm run dev` and visit `/tests/runner.html`. The suite exercises the actual image worker in the browser: real HEIC and TIFF inputs; all six output signatures, dimensions, and alpha handling; quality and byte caps; impossible-size failures; resizing policies; corrupt-file recovery; and byte-for-byte ZIP round trips. Test images contain no user data and are excluded from the production build. Fixture provenance is in `tests/fixtures/README.md`.
+`npm run test:unit` checks all translation keys and placeholders, locale selection, saved/shared settings validation, filename safety, geometry policies and folder collision handling.
 
-`npm run test:locales` checks translation coverage, interpolation, and language selection. With the dev server running, `/tests/localization.html` checks all ten languages at mobile, tablet, and desktop widths, plus conversion, errors, and language changes with a batch in memory.
+With the dev server running, open `/tests/runner.html` for browser engine verification: real HEIC/TIFF inputs; output signatures and transparency; AVIF and PNG palette encoding; byte caps; crop/pad/rotate/flip; text and logo watermarks; animated GIF/WebP/APNG timing, loops and compositing; fallback decoding; full-resolution previews; actual local AI inference; and ZIP byte round trips.
+
+Open `/tests/localization.html` for all ten languages at mobile, tablet and desktop widths, including all settings tabs, crop/comparison dialogs, translated errors, preset restoration, naming and shared settings. Tests use synthetic images and public fixtures and are excluded from production. Fixture provenance is in `tests/fixtures/README.md`.
 
 ## Libraries
 
@@ -71,6 +84,11 @@ Images are processed sequentially in a dedicated worker, holding full pixel data
 - [UTIF](https://github.com/photopea/UTIF.js), MIT; lazily loaded for TIFF.
 - [gifenc](https://github.com/mattdesl/gifenc), MIT.
 - [fflate](https://github.com/101arrowz/fflate), MIT; ZIP packaging.
+- [jSquash AVIF](https://github.com/jamsinclair/jSquash), Apache-2.0, with its single-thread libavif/libaom encoder.
+- [UPNG.js](https://github.com/photopea/UPNG.js), MIT; PNG/APNG encoding and fallback decoding.
+- [gifuct-js](https://github.com/matt-way/gifuct-js), MIT; GIF fallback decoding.
+- [ONNX Runtime Web](https://github.com/microsoft/onnxruntime), MIT; local CPU inference.
+- [U²-Net](https://github.com/xuebinqin/U-2-Net), Apache-2.0, and [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN), BSD-3-Clause; self-hosted models.
 - [Vite](https://github.com/vitejs/vite), MIT; build tooling.
 
 The dependency versions and source distributions are recorded in `package-lock.json`. Preserve their license notices when redistributing. The application does not need any of these services at runtime.

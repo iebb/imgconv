@@ -7,3 +7,4 @@ playwright-report/
 .env.*
 .dev.vars*
 .DS_Store
+public/runtime/

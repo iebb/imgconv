@@ -1,0 +1,57 @@
+{
+  "models": [
+    {
+      "file": "u2netp.onnx",
+      "name": "U\u00b2-Net small",
+      "bytes": 4574861,
+      "license": "Apache-2.0",
+      "author": "Xuebin Qin et al.",
+      "source": "https://github.com/xuebinqin/U-2-Net",
+      "download": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+      "input": "input.1",
+      "input_shape": [
+        1,
+        3,
+        320,
+        320
+      ],
+      "output": "1959",
+      "output_shape": [
+        1,
+        1,
+        320,
+        320
+      ],
+      "preprocessing": "Resize RGB to 320\u00d7320. Divide pixels by image maximum (guard zero), subtract mean [0.485,0.456,0.406] and divide std [0.229,0.224,0.225]. Float32 NCHW.",
+      "postprocessing": "Use first output. Normalize mask from its minimum to maximum, guard flat mask. Resize to original image, multiply existing alpha.",
+      "sha256": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8"
+    },
+    {
+      "file": "realesr-general-x4v3.onnx",
+      "name": "Real-ESRGAN general x4 v3",
+      "bytes": 4871181,
+      "license": "BSD-3-Clause",
+      "author": "Xintao Wang et al.",
+      "source": "https://github.com/xinntao/Real-ESRGAN",
+      "download": "https://huggingface.co/Heliosoph/realesrgan-onnx/resolve/488e5dda07333179f229a6205d92135eea4c25e9/realesr-general-x4v3.onnx",
+      "input": "input",
+      "input_shape": [
+        1,
+        3,
+        "H",
+        "W"
+      ],
+      "output": "output",
+      "output_shape": [
+        1,
+        3,
+        "4H",
+        "4W"
+      ],
+      "preprocessing": "RGB float32 NCHW, channel values divided by 255. Tile large images with overlap; upstream default overlap is 10 source pixels.",
+      "postprocessing": "Crop overlap from output tiles, clamp pixels to [0,1], multiply by 255. Preserve source alpha separately. Downsample 4\u00d7 result for 2\u00d7 output.",
+      "sha256": "09b757accd747d7e423c1d352b3e8f23e77cc5742d04bae958d4eb8082b76fa4"
+    }
+  ],
+  "verification": "ONNX checker and CPU inference passed for both files; background model opset11, super-resolution opset14. No external-data files required."
+}
